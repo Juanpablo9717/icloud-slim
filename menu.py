@@ -991,8 +991,9 @@ def self_check():
     calls = []
     api = fake_api(calls)
     m = Menu(api)
+    keys = m.check_setup()
+    m.check_setup = lambda: dict.fromkeys(keys, True)  # the real check depends on this Mac's permissions
     m._refresh()
-    m.checks = dict.fromkeys(m.checks, True)
     assert m.left(("videos",))[0] == 568 and m.hiscore == 60_000_000_000 - 7_600_000_000
     screens = [("main", None), ("prep", "videos"), ("prep", "all"), ("setup", None), ("settings", None),
                *[("help", None)] * HELP_PAGES, ("message", ("TITLE", tr("msg.perm", term="Terminal", bundle="x")))]
