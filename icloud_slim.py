@@ -136,6 +136,14 @@ i18n.STRINGS.update({
                     "es": "FALLÓ, revisa Ajustes del Sistema > Privacidad > Fotos"},
     "perm.control": {"en": "Requesting control of the Photos app ('wants to control Photos' prompt: OK)...",
                      "es": "Pidiendo control de la app Fotos (en el aviso 'quiere controlar Fotos': OK)..."},
+    "perm.waiting": {"en": "Waiting for Photos… if it shows a welcome screen or a permission window, accept it "
+                           "(it may be behind other windows)",
+                     "es": "Esperando a Fotos… si muestra una pantalla de bienvenida o una ventana de permiso, acéptala "
+                           "(puede estar detrás de otras ventanas)"},
+    "perm.control_failed": {"en": "FAILED. Open Photos and close any welcome window, then check System Settings > "
+                                  "Privacy & Security > Automation > your terminal > Photos, and run this again",
+                            "es": "FALLÓ. Abre Fotos y cierra cualquier ventana de bienvenida; luego revisa Ajustes del "
+                                  "Sistema > Privacidad y seguridad > Automatización > tu terminal > Fotos, y vuelve a correrlo"},
     "perm.import": {"en": "  Photos (import and albums):", "es": "  Fotos (importar y álbumes):"},
     # reports: table columns
     "col.items": {"en": "Items", "es": "Ítems"},
@@ -1134,13 +1142,25 @@ def cmd_permissions(a):
     print(tr("perm.ask"))
     db = load_library()
     p = min((x for x in db.photos(images=True, movies=False) if x.original_filesize), key=lambda x: x.original_filesize)
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, Console().status(tr("perm.waiting")):
         ok = PhotoExporter(p).export(d, options=ExportOptions(use_photokit=True, download_missing=True)).exported
     print(tr("perm.download"), "OK" if ok else tr("perm.failed"))
     if not ok:
         sys.exit(1)  # the menu's Setup reads this as "not granted"
     print(tr("perm.control"))
-    print(tr("perm.import"), "OK", photoscript.PhotosLibrary().version)
+    # osascript instead of photoscript: it can be timed out. A first launch of Photos (welcome screen, library
+    # choice) or a hidden permission window would otherwise hang here with no feedback.
+    subprocess.run(["open", "-a", "Photos"])
+    try:
+        with Console().status(tr("perm.waiting")):
+            r = subprocess.run(["osascript", "-e", 'tell application "Photos" to get version'],
+                               capture_output=True, text=True, timeout=300)
+        ok = r.returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    print(tr("perm.import"), f"OK {r.stdout.strip()}" if ok else tr("perm.control_failed"))
+    if not ok:
+        sys.exit(1)
 
 
 def cmd_analyze(a):
