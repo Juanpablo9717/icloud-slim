@@ -1,0 +1,16 @@
+#!/bin/zsh
+# icloud-slim — shrink videos and screenshots in Apple Photos (iCloud). See README.md
+DIR=${0:A:h}
+
+if [[ ${1-} == install ]]; then
+  command -v brew >/dev/null || { echo "Homebrew is missing. Install it from https://brew.sh and run again: ./icloud-slim install"; exit 1; }
+  brew install ffmpeg exiftool pipx || exit 1
+  pipx install osxphotos || pipx upgrade osxphotos
+  echo "\nDone. Next step: ./icloud-slim permissions"
+  exit
+fi
+
+OSXPHOTOS=$(command -v osxphotos || echo ~/.local/bin/osxphotos)
+[[ -x $OSXPHOTOS ]] || { echo "Run this first: ./icloud-slim install"; exit 1; }
+# caffeinate: keep the Mac awake while processing
+exec caffeinate -i "$OSXPHOTOS" run "$DIR/icloud_slim.py" "$@"
