@@ -129,22 +129,28 @@ i18n.STRINGS.update({
     "demo.err_download": {"en": "iCloud download failed or timed out after 149 min (will retry)",
                           "es": "la descarga de iCloud falló o se agotó el tiempo tras 149 min (se reintentará)"},
     # permissions
-    "perm.ask": {"en": "Requesting Photos access (if a prompt appears, choose 'Allow Access to All Photos')...",
-                 "es": "Pidiendo acceso a Fotos (si aparece un aviso, elige 'Permitir acceso a todas las fotos')..."},
-    "perm.download": {"en": "  Photos (download from iCloud):", "es": "  Fotos (descargar de iCloud):"},
-    "perm.failed": {"en": "FAILED, check System Settings > Privacy > Photos",
-                    "es": "FALLÓ, revisa Ajustes del Sistema > Privacidad > Fotos"},
-    "perm.control": {"en": "Requesting control of the Photos app ('wants to control Photos' prompt: OK)...",
-                     "es": "Pidiendo control de la app Fotos (en el aviso 'quiere controlar Fotos': OK)..."},
-    "perm.waiting": {"en": "Waiting for Photos… if it shows a welcome screen or a permission window, accept it "
-                           "(it may be behind other windows)",
-                     "es": "Esperando a Fotos… si muestra una pantalla de bienvenida o una ventana de permiso, acéptala "
-                           "(puede estar detrás de otras ventanas)"},
-    "perm.control_failed": {"en": "FAILED. Open Photos and close any welcome window, then check System Settings > "
-                                  "Privacy & Security > Automation > your terminal > Photos, and run this again",
-                            "es": "FALLÓ. Abre Fotos y cierra cualquier ventana de bienvenida; luego revisa Ajustes del "
-                                  "Sistema > Privacidad y seguridad > Automatización > tu terminal > Fotos, y vuelve a correrlo"},
-    "perm.import": {"en": "  Photos (import and albums):", "es": "  Fotos (importar y álbumes):"},
+    "perm.title": {"en": "iCloud Slim · permissions", "es": "iCloud Slim · permisos"},
+    "perm.intro": {"en": "macOS will ask for access in one or two windows. Accept them all.",
+                   "es": "macOS pedirá acceso en una o dos ventanas. Acéptalas todas."},
+    "perm.s1": {"en": "Reading your photo library", "es": "Leyendo tu fototeca"},
+    "perm.s1.hint": {"en": "the first time can take a minute", "es": "la primera vez puede tardar un minuto"},
+    "perm.s1.ok": {"en": "{n} items", "es": "{n} ítems"},
+    "perm.s2": {"en": "Access to your photos", "es": "Acceso a tus fotos"},
+    "perm.s2.hint": {"en": "macOS window → \"Allow Full Access\" (it may be behind other windows)",
+                     "es": "ventana de macOS → \"Permitir acceso completo\" (puede estar detrás de otras ventanas)"},
+    "perm.s2.fix": {"en": "Open System Settings > Privacy & Security > Photos, set your terminal to Full Access, "
+                          "quit the terminal (⌘Q), reopen it and run this again.",
+                    "es": "Abre Ajustes del Sistema > Privacidad y seguridad > Fotos, pon tu terminal en Acceso completo, "
+                          "cierra la terminal (⌘Q), ábrela de nuevo y vuelve a correr esto."},
+    "perm.s3": {"en": "Control of the Photos app", "es": "Control de la app Fotos"},
+    "perm.s3.hint": {"en": "Photos opens: close its welcome screen if it shows one · macOS window → \"OK\"",
+                     "es": "se abre Fotos: cierra su pantalla de bienvenida si aparece · ventana de macOS → \"OK\""},
+    "perm.s3.fix": {"en": "Open Photos and close any welcome window. Then check System Settings > Privacy & Security > "
+                          "Automation > your terminal > Photos (on), and run this again.",
+                    "es": "Abre Fotos y cierra cualquier ventana de bienvenida. Luego revisa Ajustes del Sistema > "
+                          "Privacidad y seguridad > Automatización > tu terminal > Fotos (activado), y vuelve a correr esto."},
+    "perm.timeout": {"en": "no answer after {m} min", "es": "sin respuesta tras {m} min"},
+    "perm.done": {"en": "All set. Next: ./icloud-slim (opens the menu)", "es": "Todo listo. Siguiente: ./icloud-slim (abre el menú)"},
     # reports: table columns
     "col.items": {"en": "Items", "es": "Ítems"},
     "col.size": {"en": "Size", "es": "Tamaño"},
@@ -1138,29 +1144,101 @@ class Dashboard:
 
 # ---------- commands ----------
 
+def run_steps(steps):
+    """Checklist with a live spinner: steps = [(label, hint, fix, fn)]; fn() runs in a thread and returns a short
+    detail, or raises. Stops at the first failure and shows how to fix it. Returns True if all passed."""
+    from rich.padding import Padding
+    from rich.spinner import Spinner
+    from rich.table import Table
+    from rich.text import Text
+    con, n = Console(), len(steps)
+    done = []  # (ok, label, detail)
+    con.print(f"\n  [bold #7fdbff]{tr('perm.title')}[/]\n  [dim]{tr('perm.intro')}[/]\n")
+
+    lw = max(cell_len(label) for label, *_ in steps) + 5
+
+    def grid(rows):
+        g = Table.grid(padding=(0, 2))
+        g.add_column(width=1), g.add_column(width=lw), g.add_column()
+        for r in rows:
+            g.add_row(*r)
+        return Padding(g, (0, 0, 0, 2))
+
+    def view(i, spinner, t0):
+        rows, hint = [], None
+        for j, (label, h, _, _) in enumerate(steps):
+            num = f"[dim]{j + 1}/{n}[/]  "
+            if j < len(done):
+                ok, _, detail = done[j]
+                rows.append(("[green]✓[/]" if ok else "[red]✗[/]", num + label, f"[dim]{detail}[/]"))
+            elif j == i:
+                rows.append((spinner, f"{num}[bold]{label}[/]", f"[dim]{int(time.time() - t0)} s[/]"))
+                hint = len(rows)
+            else:
+                rows.append(("[dim]·[/]", f"[dim]{num}{label}[/]", ""))
+        if hint is None:
+            return grid(rows)
+        tip = Padding(Text(f"→ {steps[i][1]}", style="yellow"), (0, 2, 0, 11))  # under the label
+        return Group(grid(rows[:hint]), tip, grid(rows[hint:]))
+
+    with Live(console=con, refresh_per_second=10, transient=False) as live:
+        for i, (label, hint, fix, fn) in enumerate(steps):
+            out, t0, spinner = {}, time.time(), Spinner("dots", style="cyan")
+            def work():
+                try:
+                    out["r"] = fn()
+                except Exception as e:  # shown to the user, with the fix below
+                    out["e"] = str(e) or type(e).__name__
+            th = threading.Thread(target=work, daemon=True)
+            th.start()
+            while th.is_alive():
+                live.update(view(i, spinner, t0))
+                th.join(0.1)
+            secs = f"{time.time() - t0:.0f} s"
+            done.append(("e" not in out, label, f"{out['r']} · {secs}" if "e" not in out else out["e"]))
+            live.update(view(i + 1, spinner, t0))
+            if "e" in out:
+                break
+    if len(done) == n and done[-1][0]:
+        con.print(Padding(Text(tr("perm.done"), style="green"), (1, 2, 1, 2)))
+        return True
+    con.print(Padding(Text(steps[len(done) - 1][2], style="yellow"), (1, 2, 1, 5)))  # aligned with the labels
+    return False
+
+
 def cmd_permissions(a):
-    print(tr("perm.ask"))
-    db = load_library()
-    p = min((x for x in db.photos(images=True, movies=False) if x.original_filesize), key=lambda x: x.original_filesize)
-    with tempfile.TemporaryDirectory() as d, Console().status(tr("perm.waiting")):
-        ok = PhotoExporter(p).export(d, options=ExportOptions(use_photokit=True, download_missing=True)).exported
-    print(tr("perm.download"), "OK" if ok else tr("perm.failed"))
-    if not ok:
-        sys.exit(1)  # the menu's Setup reads this as "not granted"
-    print(tr("perm.control"))
-    # osascript instead of photoscript: it can be timed out. A first launch of Photos (welcome screen, library
-    # choice) or a hidden permission window would otherwise hang here with no feedback.
-    subprocess.run(["open", "-a", "Photos"])
-    try:
-        with Console().status(tr("perm.waiting")):
+    lib = {}
+
+    def read():
+        lib["db"] = load_library()
+        return tr("perm.s1.ok", n=f"{len(lib['db'].photos()):,}")
+
+    def access():
+        db = lib["db"]
+        p = min((x for x in db.photos(images=True, movies=False) if x.original_filesize), key=lambda x: x.original_filesize)
+        with tempfile.TemporaryDirectory() as d:
+            if not PhotoExporter(p).export(d, options=ExportOptions(use_photokit=True, download_missing=True)).exported:
+                raise RuntimeError(tr("perm.s2.fix").split(".")[0])
+        return "OK"
+
+    def control():
+        # osascript instead of photoscript: it can be timed out. A first launch of Photos (welcome screen, library
+        # choice) or a hidden permission window would otherwise hang here forever.
+        subprocess.run(["open", "-a", "Photos"])
+        try:
             r = subprocess.run(["osascript", "-e", 'tell application "Photos" to get version'],
                                capture_output=True, text=True, timeout=300)
-        ok = r.returncode == 0
-    except subprocess.TimeoutExpired:
-        ok = False
-    print(tr("perm.import"), f"OK {r.stdout.strip()}" if ok else tr("perm.control_failed"))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(tr("perm.timeout", m=5))
+        if r.returncode:
+            raise RuntimeError(r.stderr.strip()[-120:] or "osascript failed")
+        return f"Photos {r.stdout.strip()}"
+
+    ok = run_steps([(tr("perm.s1"), tr("perm.s1.hint"), tr("perm.s2.fix"), read),
+                    (tr("perm.s2"), tr("perm.s2.hint"), tr("perm.s2.fix"), access),
+                    (tr("perm.s3"), tr("perm.s3.hint"), tr("perm.s3.fix"), control)])
     if not ok:
-        sys.exit(1)
+        sys.exit(1)  # the menu's Setup reads this as "not granted"
 
 
 def cmd_analyze(a):

@@ -95,7 +95,7 @@ macOS will show two prompts. Accept both:
 | **"Terminal" would like to access your Photos** | **Allow Full Access** (not "Limit Access") |
 | **"Terminal" wants access to control "Photos"** | **Allow** / **OK** |
 
-It should end with `OK` on both lines.
+It shows a 3-step checklist with what to do at each step (the macOS windows may open behind other windows). It should end with ✓ on all three and "All set". If a step fails it stops and tells you how to fix it.
 
 **If no prompt appears, or it says FAILED:**
 

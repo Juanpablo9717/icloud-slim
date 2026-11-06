@@ -97,7 +97,7 @@ macOS mostrará dos avisos. Acepta los dos:
 | **"Terminal" quiere acceder a tus Fotos** | **Permitir acceso completo** (no "Limitar acceso") |
 | **"Terminal" quiere controlar "Fotos"** | **Permitir** / **Aceptar** |
 
-Al final tiene que decir `OK` en las dos líneas.
+Muestra una lista de 3 pasos con qué hacer en cada uno (las ventanas de macOS pueden abrirse detrás de otras). Al final tiene que haber ✓ en los tres y "Todo listo". Si un paso falla, se detiene y te dice cómo arreglarlo.
 
 **Si no aparece ningún aviso, o dice FAILED:**
 
