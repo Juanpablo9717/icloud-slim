@@ -1384,19 +1384,22 @@ def cmd_analyze(a):
 def build_queue(types, retry=False, uuids=None):
     """[(photo, type)] still to process, biggest first. Also what the menu counts."""
     db, state = load_library(), State()
-    queue, ready = [], set()
+    queue, ready, failed = [], set(), set()
     for p in db.photos(uuid=uuids) if uuids else db.photos():
         typ, reason = evaluate(p)
         row = state.get(p.uuid)
         if row and row["status"] in ("compressed", "imported"):
             ready.add(p.uuid)
+        elif row and row["attempts"]:
+            failed.add(p.uuid)
         if row and row["status"] not in FINAL and row["status"] != "pending":
             reason = None  # left halfway: resume it
         if typ in types and not reason and not (row and (row["status"] in FINAL + ("replaced",)
                                                          or row["attempts"] >= MAX_ATTEMPTS and not retry)):
             queue.append((p, typ))
-    # already compressed first (seconds each, nothing to download), then biggest savings first
-    queue.sort(key=lambda x: (x[0].uuid not in ready, -(x[0].original_filesize or 0)))
+    # already compressed first (seconds each, nothing to download), then biggest savings first; ones that already
+    # failed go last, so a video iCloud keeps refusing doesn't hold up the downloads for hours
+    queue.sort(key=lambda x: (x[0].uuid not in ready, x[0].uuid in failed, -(x[0].original_filesize or 0)))
     return queue
 
 
