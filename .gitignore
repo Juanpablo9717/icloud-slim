@@ -2,3 +2,13 @@ __pycache__/
 .DS_Store
 .claude/
 CLAUDE.local.md
+# work files, in case the repo is cloned into ~/icloud-slim (the default work folder)
+state.db*
+logs/
+reports/
+metrics.md
+settings.json
+process.lock
+compressed/
+originals/
+originals-backup/
