@@ -125,6 +125,33 @@ i18n.STRINGS.update({
                          "es": "Los originales NO se borraron ({out}); se te volverá a preguntar"},
     "note.confirm_last": {"en": "Done processing — confirm the last deletion in the macOS dialog",
                           "es": "Procesamiento terminado: confirma el último borrado en la ventana de macOS"},
+    "note.systemic": {"en": "Stopped: {n} in a row failed. See below what to check.",
+                      "es": "Se detuvo: fallaron {n} seguidos. Abajo ves qué revisar."},
+    "proc.systemic": {"en": "[bold red]Stopped: {n} items in a row failed[/] (nothing was lost; they're retried next time).\n"
+                            "This usually means Photos isn't ready or iCloud is too slow right now:\n"
+                            "  1. Open Photos and close any window it shows (welcome, iCloud, updates).\n"
+                            "  2. Wait until it finishes syncing: at the bottom of Photos > Library it says \"Updated\".\n"
+                            "  3. Check the internet connection (VPN off, close to the router or on a cable).\n"
+                            "  4. Run it again.",
+                      "es": "[bold red]Se detuvo: fallaron {n} seguidos[/] (no se perdió nada; se reintentan la próxima vez).\n"
+                            "Casi siempre es porque Fotos no está lista o iCloud está muy lento ahora:\n"
+                            "  1. Abre Fotos y cierra cualquier ventana que muestre (bienvenida, iCloud, actualizaciones).\n"
+                            "  2. Espera a que termine de sincronizar: abajo en Fotos > Biblioteca dice \"Actualizado\".\n"
+                            "  3. Revisa la conexión a internet (sin VPN, cerca del router o por cable).\n"
+                            "  4. Vuelve a correrlo."},
+    "proc.photos_check": {"en": "Checking that Photos is ready…", "es": "Revisando que Fotos esté lista…"},
+    "proc.photos_not_ready": {"en": "[bold red]Photos isn't ready[/] ({why}). Nothing was changed.\n"
+                                    "  1. Open Photos and close any window it shows (welcome, iCloud, updates).\n"
+                                    "  2. Wait until it finishes syncing: at the bottom of Photos > Library it says \"Updated\".\n"
+                                    "  3. Run it again. If it keeps failing: ./icloud-slim permissions",
+                              "es": "[bold red]Fotos no está lista[/] ({why}). No se cambió nada.\n"
+                                    "  1. Abre Fotos y cierra cualquier ventana que muestre (bienvenida, iCloud, actualizaciones).\n"
+                                    "  2. Espera a que termine de sincronizar: abajo en Fotos > Biblioteca dice \"Actualizado\".\n"
+                                    "  3. Vuelve a correrlo. Si sigue fallando: ./icloud-slim permissions"},
+    "why.no_answer": {"en": "it didn't answer in 2 min", "es": "no respondió en 2 min"},
+    "why.not_found": {"en": "it can't find the photos of its own library yet", "es": "todavía no encuentra las fotos de su propia fototeca"},
+    "err.not_found": {"en": "Photos can't find this item yet (still syncing, or busy with a window)",
+                      "es": "Fotos todavía no encuentra este ítem (sigue sincronizando o está ocupada con una ventana)"},
     "note.finished": {"en": "Finished", "es": "Terminado"},
     "demo.title": {"en": "videos (demo)", "es": "videos (demo)"},
     "demo.finished": {"en": "Demo finished", "es": "Demo terminada"},
@@ -1360,6 +1387,30 @@ def single_run(take=True):
     return _run_lock is not None
 
 
+FAILS_TO_STOP = 3  # items in a row that fail at any step, with no success in between
+
+
+def fails_in_row(n, row):
+    """Running count of failed items; an interrupted one (no error, not finished) leaves it as it was."""
+    if row and row["status"] in FINAL + ("replaced",):
+        return 0
+    return n + 1 if row and row["error"] else n
+
+
+def photos_not_ready(p):
+    """Why Photos can't be used right now, or None. Photos must answer AppleScript and find a library item:
+    on a new Mac it can sit behind a welcome window or still be syncing, and then every item fails."""
+    try:
+        with console.status(tr("proc.photos_check")):
+            r = subprocess.run(["osascript", "-e", f'tell application "Photos" to exists media item id "{p.uuid}/L0/001"'],
+                               capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return tr("why.no_answer")
+    if r.returncode:
+        return r.stderr.strip()[-150:] or "osascript failed"
+    return None if r.stdout.strip() == "true" else tr("why.not_found")
+
+
 def cmd_process(a):
     types = TYPES if a.type == "all" else (a.type,)
     state = State()
@@ -1383,13 +1434,17 @@ def cmd_process(a):
                         handlers=[logging.FileHandler(logfile)])
     log.info(f"Start: {len(queue)} items")
     console.print(tr("proc.log", path=logfile))
+    if queue and (why := photos_not_ready(queue[0][0])):
+        log.error(f"Photos not ready: {why}")
+        single_run(take=False)
+        return console.print(tr("proc.photos_not_ready", why=why))
     lib = photoscript.PhotosLibrary()
     deleter = Deleter(state, a.delete_every)
     pending = deleter.pending
     global ui
     ui = Dashboard(", ".join(tr("type." + t) for t in types), len(queue), before, fun=a.fun)
     ui.deleter, ui.pending = deleter, pending()
-    stopped = False
+    stopped, in_row = False, [0]
     try:
         with Live(get_renderable=lambda: ui, console=console, refresh_per_second=8, screen=True):
             deleter.request(force=True)  # anything a previous run replaced but couldn't delete
@@ -1398,7 +1453,14 @@ def cmd_process(a):
 
             def complete(p, t, start):
                 complete_item(p, state, lib, a, start)
-                ui.end_item(p, state.get(p.uuid), pending())
+                row = state.get(p.uuid)
+                ui.end_item(p, row, pending())
+                # n failures in a row with nothing working = Photos or iCloud trouble, not bad files: stop, explain
+                in_row[0] = fails_in_row(in_row[0], row)
+                if in_row[0] >= FAILS_TO_STOP and not STOP.is_set():
+                    log.error(f"Stopping: {in_row[0]} failed in a row")
+                    ui.step(tr("note.systemic", n=in_row[0]), "bold red")
+                    STOP.set()
                 log.info(f"[{next(count)}/{len(queue)}] {t}: {p.original_filename} ({fmt(p.original_filesize)}, {p.date.date()})")
                 deleter.request()
                 ui.pending = pending()
@@ -1423,6 +1485,8 @@ def cmd_process(a):
     if stopped:
         log.info("Stopped by user")
         console.print(tr("proc.stopped"))
+    elif in_row[0] >= FAILS_TO_STOP:
+        console.print(tr("proc.systemic", n=in_row[0]))
     ui = None
     single_run(take=False)
     cmd_status(a)
@@ -1441,8 +1505,13 @@ def cmd__export(a):
         shutil.rmtree(tmp, True)
         tmp.mkdir(parents=True)
         wait = int(os.environ.get("OSXPHOTOS_PHOTOKIT_TIMEOUT", 600))
-        files = [Path(shutil.move(f, a.dest)) for f in
-                 photoscript.Photo(a.uuid).export(str(tmp), original=True, timeout=wait)]
+        try:
+            files = [Path(shutil.move(f, a.dest)) for f in
+                     photoscript.Photo(a.uuid).export(str(tmp), original=True, timeout=wait)]
+        except Exception as e2:  # the last stderr line is what the panel shows: both reasons, in plain words
+            print(f"PhotoKit: {e} · " + (tr("err.not_found") if "Invalid photo id" in str(e2) else f"Photos: {e2}"),
+                  file=sys.stderr)
+            sys.exit(1)
         shutil.rmtree(tmp, True)
     print(json.dumps([str(f) for f in files]))
 
