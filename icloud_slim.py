@@ -62,6 +62,8 @@ i18n.STRINGS.update({
     "err.no_shrink": {"en": "saves less than 10 %", "es": "ahorra menos del 10 %"},
     "log.photos_restart": {"en": "Restarting Photos (it gets slow after many imports)…",
                            "es": "Reiniciando Fotos (se pone lenta tras muchas importaciones)…"},
+    "err.import_canceled": {"en": "Photos canceled the import (it was closed, or busy with a window); retried on the next run",
+                            "es": "Fotos canceló la importación (se cerró o estaba ocupada con una ventana); se reintenta en la próxima corrida"},
     "err.import": {"en": "Photos did not accept the file", "es": "Fotos no aceptó el archivo"},
     "err.photos_stuck": {"en": "Photos stopped accepting files: stopping. Quit and reopen Photos, then run again "
                                "(everything resumes where it stopped).",
@@ -840,8 +842,12 @@ def import_file(lib, f):
     (stuck, not a bad file): then retry this one once. 5 in a row stops the run (complete_item)."""
     if IMPORTS["ok"] >= RESTART_EVERY:
         restart_photos()
+    why = tr("err.import")
     for retry in (False, True):
-        new = lib.import_photos([str(f)], skip_duplicate_check=True)
+        try:
+            new = lib.import_photos([str(f)], skip_duplicate_check=True)
+        except Exception as e:  # AppleScript error: -128 = Photos canceled it (closed, or busy with a window)
+            new, why = None, tr("err.import_canceled") if "-128" in str(e) else str(e)
         if new:
             IMPORTS["fails"], IMPORTS["ok"] = 0, IMPORTS["ok"] + 1
             return new[0]
@@ -849,7 +855,7 @@ def import_file(lib, f):
         if retry or IMPORTS["fails"] != 3:
             break
         restart_photos()
-    raise RuntimeError(tr("err.import"))
+    raise RuntimeError(why)
 
 
 def complete_item(p, state, lib, a, _queued_at):
