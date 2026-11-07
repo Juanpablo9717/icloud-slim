@@ -1384,16 +1384,19 @@ def cmd_analyze(a):
 def build_queue(types, retry=False, uuids=None):
     """[(photo, type)] still to process, biggest first. Also what the menu counts."""
     db, state = load_library(), State()
-    queue = []
+    queue, ready = [], set()
     for p in db.photos(uuid=uuids) if uuids else db.photos():
         typ, reason = evaluate(p)
         row = state.get(p.uuid)
+        if row and row["status"] in ("compressed", "imported"):
+            ready.add(p.uuid)
         if row and row["status"] not in FINAL and row["status"] != "pending":
             reason = None  # left halfway: resume it
         if typ in types and not reason and not (row and (row["status"] in FINAL + ("replaced",)
                                                          or row["attempts"] >= MAX_ATTEMPTS and not retry)):
             queue.append((p, typ))
-    queue.sort(key=lambda x: -(x[0].original_filesize or 0))  # biggest savings first
+    # already compressed first (seconds each, nothing to download), then biggest savings first
+    queue.sort(key=lambda x: (x[0].uuid not in ready, -(x[0].original_filesize or 0)))
     return queue
 
 
@@ -1526,12 +1529,15 @@ def cmd_process(a):
 def cmd__export(a):
     """Child process: download one original from iCloud into dest (see export())."""
     from osxphotos.photokit import PHOTOS_VERSION_ORIGINAL, PhotoLibrary
+    t0 = time.time()
+    took = lambda: f"{int(time.time() - t0) // 60} min"
     try:
         files = PhotoLibrary().fetch_uuid(a.uuid).export(a.dest, version=PHOTOS_VERSION_ORIGINAL)
     except Exception as e:
         # PhotoKit sometimes can't get an original ("Could not get video for asset") that the Photos app itself
         # exports fine. Export into a hidden folder first, so a half-written file is never taken as the download.
-        print(f"PhotoKit: {e}; retrying through the Photos app", file=sys.stderr)
+        print(f"PhotoKit: {e} ({took()}); retrying through the Photos app", file=sys.stderr)
+        e, t0 = f"{e} ({took()})", time.time()
         tmp = Path(a.dest) / ".photos-app"
         shutil.rmtree(tmp, True)
         tmp.mkdir(parents=True)
@@ -1539,9 +1545,11 @@ def cmd__export(a):
         try:
             files = [Path(shutil.move(f, a.dest)) for f in
                      photoscript.Photo(a.uuid).export(str(tmp), original=True, timeout=wait)]
+            if not files:
+                raise RuntimeError(tr("err.no_file"))
         except Exception as e2:  # the last stderr line is what the panel shows: both reasons, in plain words
-            print(f"PhotoKit: {e} · " + (tr("err.not_found") if "Invalid photo id" in str(e2) else f"Photos: {e2}"),
-                  file=sys.stderr)
+            print(f"PhotoKit: {e} · " + (tr("err.not_found") if "Invalid photo id" in str(e2) else f"Photos: {e2}")
+                  + f" ({took()})", file=sys.stderr)
             sys.exit(1)
         shutil.rmtree(tmp, True)
     print(json.dumps([str(f) for f in files]))
