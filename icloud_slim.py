@@ -14,6 +14,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import osxphotos, photoscript
+with contextlib.suppress(ImportError):  # photoscript kills Photos on any 2-min AppleScript timeout: we handle timeouts
+    from photoscript.script_loader import configure_run_script
+    configure_run_script(retry_enabled=False)
 from osxphotos import ExportOptions, PhotoExporter
 from rich.cells import cell_len  # rich ships with osxphotos
 from rich.console import Console, Group
@@ -62,6 +65,8 @@ i18n.STRINGS.update({
     "err.no_shrink": {"en": "saves less than 10 %", "es": "ahorra menos del 10 %"},
     "log.photos_restart": {"en": "Restarting Photos (it gets slow after many imports)…",
                            "es": "Reiniciando Fotos (se pone lenta tras muchas importaciones)…"},
+    "err.import_timeout": {"en": "Photos didn't finish saving it in {m} min; retried on the next run",
+                           "es": "Fotos no terminó de guardarlo en {m} min; se reintenta en la próxima corrida"},
     "err.import_canceled": {"en": "Photos canceled the import (it was closed, or busy with a window); retried on the next run",
                             "es": "Fotos canceló la importación (se cerró o estaba ocupada con una ventana); se reintenta en la próxima corrida"},
     "err.import": {"en": "Photos did not accept the file", "es": "Fotos no aceptó el archivo"},
@@ -864,6 +869,32 @@ def restart_photos():
     IMPORTS["ok"] = 0
 
 
+def photos_import(f):
+    """Import one file into Photos; returns the new item (with .uuid) or None if Photos rejected it.
+    Own AppleScript instead of photoscript's: that one gives up after AppleScript's default 2 min, and a big video
+    on a busy Mac takes longer. Waits ~1 min per 100 MB (at least 10 min)."""
+    wait = max(600, f.stat().st_size // 1_600_000)
+    script = f"""on run argv
+        with timeout of {wait} seconds
+            tell application "Photos"
+                set r to import {{POSIX file (item 1 of argv)}} skip check duplicates true
+                if r is missing value or r is {{}} then return ""
+                return id of item 1 of r
+            end tell
+        end timeout
+    end run"""
+    try:
+        r = subprocess.run(["osascript", "-e", script, str(f)], capture_output=True, text=True, timeout=wait + 60)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(tr("err.import_timeout", m=wait // 60))
+    if r.returncode:
+        if "-1712" in r.stderr:  # AppleScript's own timeout
+            raise RuntimeError(tr("err.import_timeout", m=wait // 60))
+        raise RuntimeError(r.stderr.strip()[-200:] or "osascript failed")
+    new = r.stdout.strip()
+    return types.SimpleNamespace(uuid=new.split("/")[0]) if new else None
+
+
 def import_file(lib, f):
     """Import into Photos. Restart Photos every RESTART_EVERY imports, and when it rejects 3 files in a row
     (stuck, not a bad file): then retry this one once. 5 in a row stops the run (complete_item)."""
@@ -872,12 +903,12 @@ def import_file(lib, f):
     why = tr("err.import")
     for retry in (False, True):
         try:
-            new = lib.import_photos([str(f)], skip_duplicate_check=True)
+            new = photos_import(f)
         except Exception as e:  # AppleScript error: -128 = Photos canceled it (closed, or busy with a window)
             new, why = None, tr("err.import_canceled") if "-128" in str(e) else str(e)
         if new:
             IMPORTS["fails"], IMPORTS["ok"] = 0, IMPORTS["ok"] + 1
-            return new[0]
+            return new
         IMPORTS["fails"] += 1
         if retry or IMPORTS["fails"] != 3:
             break
