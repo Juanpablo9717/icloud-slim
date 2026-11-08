@@ -132,13 +132,13 @@ i18n.STRINGS.update({
                           "es": "Procesamiento terminado: confirma el último borrado en la ventana de macOS"},
     "note.systemic": {"en": "Stopped: {n} in a row failed. See below what to check.",
                       "es": "Se detuvo: fallaron {n} seguidos. Abajo ves qué revisar."},
-    "proc.systemic": {"en": "[bold red]Stopped: {n} items in a row failed[/] (nothing was lost; they're retried next time).\n"
+    "proc.systemic": {"en": "[bold red]Stopped: {n} items in a row failed, even after pausing 10, 20 and 40 min[/] (nothing was lost; they're retried next time).\n"
                             "This usually means Photos isn't ready or iCloud is too slow right now:\n"
                             "  1. Open Photos and close any window it shows (welcome, iCloud, updates).\n"
                             "  2. Wait until it finishes syncing: at the bottom of Photos > Library it says \"Updated\".\n"
                             "  3. Check the internet connection (VPN off, close to the router or on a cable).\n"
                             "  4. Run it again.",
-                      "es": "[bold red]Se detuvo: fallaron {n} seguidos[/] (no se perdió nada; se reintentan la próxima vez).\n"
+                      "es": "[bold red]Se detuvo: fallaron {n} seguidos, incluso tras pausar 10, 20 y 40 min[/] (no se perdió nada; se reintentan la próxima vez).\n"
                             "Casi siempre es porque Fotos no está lista o iCloud está muy lento ahora:\n"
                             "  1. Abre Fotos y cierra cualquier ventana que muestre (bienvenida, iCloud, actualizaciones).\n"
                             "  2. Espera a que termine de sincronizar: abajo en Fotos > Biblioteca dice \"Actualizado\".\n"
@@ -157,6 +157,10 @@ i18n.STRINGS.update({
     "why.not_found": {"en": "it can't find the photos of its own library yet", "es": "todavía no encuentra las fotos de su propia fototeca"},
     "err.not_found": {"en": "Photos can't find this item yet (still syncing, or busy with a window)",
                       "es": "Fotos todavía no encuentra este ítem (sigue sincronizando o está ocupada con una ventana)"},
+    "note.confirm_to_save": {"en": "Accept the delete confirmation from macOS to keep saving to Photos · downloads continue",
+                             "es": "Acepta la confirmación de borrado de macOS para seguir guardando en Fotos · las descargas siguen"},
+    "note.paused": {"en": "{n} failed in a row: pausing downloads {m} min, back at {at} (iCloud or Photos needs a break)",
+                    "es": "Fallaron {n} seguidos: descargas en pausa {m} min, vuelven a las {at} (iCloud o Fotos necesita un respiro)"},
     "note.finished": {"en": "Finished", "es": "Terminado"},
     "demo.title": {"en": "videos (demo)", "es": "videos (demo)"},
     "demo.finished": {"en": "Demo finished", "es": "Demo terminada"},
@@ -792,8 +796,22 @@ def show_step(p, i, waiting=False):
         ui.set_step(p, i, waiting)
 
 
+PAUSE_UNTIL = [0.0]     # no new downloads before this time (iCloud refused several in a row: give it a break)
+MIN_FREE = 30e9         # downloads wait while the disk has less free space than this
+
+
+def wait_to_download():
+    """Hold a new download during a pause, or while the disk is nearly full (originals pile up while
+    imports wait for a delete confirmation)."""
+    while not STOP.is_set():
+        left = PAUSE_UNTIL[0] - time.time()
+        if left <= 0 and shutil.disk_usage(WORKDIR).free >= MIN_FREE:
+            return
+        STOP.wait(min(max(left, 5), 30))
+
+
 def prepare_item(p, t, a):
-    """Worker thread: pending/exported → compressed (or skipped). Returns when it started, for timing."""
+    """Worker thread: pending/exported → compressed (or skipped). Returns when it started, or None if stopped first."""
     state, u, start = thread_state(), p.uuid, time.time()
     row = state.get(u) or state.add(p, t)
     if row["status"] not in ("pending", "exported"):
@@ -801,9 +819,10 @@ def prepare_item(p, t, a):
     d_orig, d_comp = WORKDIR / "originals" / u, WORKDIR / "compressed" / u
     try:
         # already downloaded by an interrupted run: don't wait behind another item's download
+        wait_to_download()
         with DOWNLOAD if row["status"] == "pending" else contextlib.nullcontext():
             if STOP.is_set():
-                return start
+                return None
             if row["status"] == "pending":
                 shutil.rmtree(d_orig, True)  # never reuse a half-finished download from an interrupted run
             show_step(p, 1)
@@ -823,7 +842,7 @@ def prepare_item(p, t, a):
         show_step(p, 2, waiting=True)
         with COMPRESS:
             if STOP.is_set():
-                return start
+                return None
             show_step(p, 2)
             log.info(f"⚙ Compressing {p.original_filename}" + (" + measuring quality (VMAF)" if a.vmaf else ""))
             dst, extra = compress(p, t, src, d_comp, a.vmaf)
@@ -840,7 +859,7 @@ def prepare_item(p, t, a):
         if STOP.is_set() or STOP.wait(1):
             if state.get(u)["status"] == "pending":
                 shutil.rmtree(d_orig, True)  # no half downloads left behind
-            return start
+            return None
         state.set(u, error=str(e), attempts=(row["attempts"] or 0) + 1)
         log.error(f"  ERROR on {p.original_filename} (step {state.get(u)['status']}): {e}")
     return start
@@ -1425,6 +1444,7 @@ def single_run(take=True):
 
 
 FAILS_TO_STOP = 3  # items in a row that fail at any step, with no success in between
+BACKOFF = (10, 20, 40)  # minutes to pause downloads after each such streak; one more streak stops the run
 
 
 def fails_in_row(n, row):
@@ -1481,7 +1501,7 @@ def cmd_process(a):
     global ui
     ui = Dashboard(", ".join(tr("type." + t) for t in types), len(queue), before, fun=a.fun)
     ui.deleter, ui.pending = deleter, pending()
-    stopped, in_row = False, [0]
+    stopped, in_row, pauses = False, [0], [0]
     try:
         with Live(get_renderable=lambda: ui, console=console, refresh_per_second=8, screen=True):
             deleter.request(force=True)  # anything a previous run replaced but couldn't delete
@@ -1489,15 +1509,35 @@ def cmd_process(a):
             count = iter(range(1, len(queue) + 1))
 
             def complete(p, t, start):
+                if start is None:
+                    return  # stopped before it began: not processed, not shown
+                # With a delete confirmation waiting, Photos stops answering AppleScript after a while (timeouts on
+                # every import). Hold the imports until it's answered; downloads and compression keep going.
+                if deleter.waiting() and state.get(p.uuid)["status"] in ("compressed", "imported"):
+                    ui.step(tr("note.confirm_to_save"), "bold yellow")
+                    while deleter.waiting() and not STOP.is_set():
+                        tick()
+                        STOP.wait(0.5)
+                    ui.note = None
                 complete_item(p, state, lib, a, start)
                 row = state.get(p.uuid)
                 ui.end_item(p, row, pending())
-                # n failures in a row with nothing working = Photos or iCloud trouble, not bad files: stop, explain
+                # n failures in a row with nothing working = Photos or iCloud trouble, not bad files: pause the
+                # downloads and try again later (10, 20, 40 min); a streak after the last pause stops the run
                 in_row[0] = fails_in_row(in_row[0], row)
+                if row and row["status"] in FINAL + ("replaced",):
+                    pauses[0] = 0
                 if in_row[0] >= FAILS_TO_STOP and not STOP.is_set():
-                    log.error(f"Stopping: {in_row[0]} failed in a row")
-                    ui.step(tr("note.systemic", n=in_row[0]), "bold red")
-                    STOP.set()
+                    if pauses[0] < len(BACKOFF):
+                        m = BACKOFF[pauses[0]]
+                        PAUSE_UNTIL[0], pauses[0], in_row[0] = time.time() + m * 60, pauses[0] + 1, 0
+                        log.error(f"Pausing downloads {m} min: {FAILS_TO_STOP} failed in a row")
+                        ui.step(tr("note.paused", n=FAILS_TO_STOP, m=m,
+                                   at=(dt.datetime.now() + dt.timedelta(minutes=m)).strftime("%H:%M")), "bold yellow")
+                    else:
+                        log.error(f"Stopping: {in_row[0]} failed in a row, after {len(BACKOFF)} pauses")
+                        ui.step(tr("note.systemic", n=in_row[0]), "bold red")
+                        STOP.set()
                 log.info(f"[{next(count)}/{len(queue)}] {t}: {p.original_filename} ({fmt(p.original_filesize)}, {p.date.date()})")
                 deleter.request()
                 ui.pending = pending()
